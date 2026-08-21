@@ -9,40 +9,61 @@ not time, is the scarce resource, and a fresh subagent per leaf resets it.
 You (the main session) are the driver. You do not implement leaves; you
 plan, dispatch, verify, and integrate.
 
-1. **Plan.** Write PLAN.md (contract, tree, gates file per leaf and branch)
-   from templates/PLAN.md. This is the only step where the whole task must
-   fit in one head.
-2. **Dispatch one leaf.** Spawn a subagent whose entire brief is:
+1. **Plan.** Write PLAN.md (contract, tree, `Owns`/`Needs`/`Tier` per leaf,
+   dispatch schedule, gates file per leaf and branch) from templates/PLAN.md.
+   This is the only step where the whole task must fit in one head. `Owns` is
+   the leaf's file lease, `Needs` names the leaves it waits on, and a leaf with
+   an empty `Needs` is ready immediately.
+2. **Dispatch every ready leaf at once.** Not one at a time. The contract
+   already guarantees disjoint file ownership, so ready leaves cannot collide;
+   holding them back buys nothing and costs wall-clock. Each brief is:
    - the contract section of PLAN.md (not the whole file, not your history)
    - its own gates file, verbatim
    - the instruction: work the four passes until every gate is met with
      evidence, then stop; if a gate is impossible, ABANDON it with a reason.
-3. **Verify, never trust.** When the leaf returns, re-run its checks
-   yourself: `node <skill-dir>/scripts/gate-check.mjs --status gates/leaf-x.md`
-   and rerun a spot-check of the CHECK commands. A leaf that checked its own
-   boxes without evidence gets sent back with the specific unmet gates named.
-   This is the layer that makes self-certification worthless.
-4. **Log and advance.** Append one line to PLAN.md's status log. Dispatch the
-   next leaf. When all children of a branch are verified, work the branch's
-   integration gates yourself (or dispatch an integration leaf for it).
-5. **Report.** Only when the root's gates are met. Paste the ledger, N of N,
+3. **Verify on return, one leaf at a time, never trust.** As each leaf comes
+   back, re-run **its** checks and nothing else:
+   `node <skill-dir>/scripts/gate-check.mjs --jobs 8 gates/leaf-x.md`
+   Name the file. A bare `gate-check` globs `GATES.md` plus every `gates/*.md`,
+   so a twelve-leaf tree re-runs all twelve checks on every single verify. A
+   leaf that checked its own boxes without evidence gets sent back with the
+   specific unmet gates named. This is the layer that makes self-certification
+   worthless.
+4. **Advance immediately.** Append one line to PLAN.md's status log, then
+   dispatch whatever that leaf just unblocked. Do not wait for its siblings.
+   Rolling dispatch keeps every worker busy; wave-by-wave dispatch idles the
+   whole fleet behind the slowest leaf in the wave.
+5. **Close the branch.** When all children of a branch are verified, work its
+   integration gates yourself (or dispatch an integration leaf). Branch gates
+   are where the whole-project checks live: the full build, the full suite,
+   the cross-child smoke test. They run once, here, not once per leaf.
+6. **Report.** Only when the root's gates are met. Paste the ledger, N of N,
    with every ABANDON line surfaced, and re-measure every number you state.
 
-## Parallelism
+## Keeping verification cheap
 
-Leaves whose file ownership is disjoint (the contract guarantees this) can
-run concurrently if the harness supports parallel subagents. Parallelism
-buys wall-clock time, not token savings; do not use it as an excuse to skip
-per-leaf verification. If two leaves ever need the same file, fix the plan,
-do not coordinate through hope.
+Verification is the last thing to cut, so make it fast instead:
+
+- **Name the files.** `gate-check.mjs gates/leaf-x.md` verifies one leaf.
+  Passing the file you care about is the difference between re-running two
+  checks and re-running the tree.
+- **Use `--jobs`.** Independent CHECK commands run concurrently:
+  `--jobs 8` turns eight one-second checks into one second. The default is 1,
+  which is sequential and unchanged from before.
+- **Share checks deliberately.** Identical CHECK command strings run once per
+  invocation and every gate naming them reads the same output, with its own
+  EXPECT applied. A branch gate that re-runs its children's exact commands
+  therefore pays for each distinct command once, not once per child.
+- **Blocking edges, not polling.** A leaf whose `Needs` are unmet is not
+  dispatched at all. Do not dispatch it and let it discover the dependency.
 
 ## Verification hierarchy
 
 Three layers, weakest to strongest, each catching what the layer below
 misses:
 
-1. **Leaf self-check**: gate-check run by the leaf itself. Catches honest
-   incompleteness, misses self-deception.
+1. **Leaf self-check**: gate-check run by the leaf itself, on its own gates
+   file. Catches honest incompleteness, misses self-deception.
 2. **Parent re-run**: the driver re-executes the checks. Catches
    self-deception and environment differences.
 3. **Stop-hook** (Claude Code, optional): structurally blocks a session from
@@ -56,12 +77,18 @@ CHECK command for it.
 
 ## Model and effort tiering
 
-Where the harness allows choosing a model or reasoning effort per subagent,
-tier by leaf type. Mechanical leaves (rename sweeps, fixture generation,
-applying a decided pattern across files) go to a cheaper model or lower
-effort. Design leaves, integration branches, and every verification pass
-stay on the strong model. The driver stays on the strong model always; a
-weak driver invalidates every verification above layer one.
+Every leaf carries a `Tier` in PLAN.md. Where the harness allows choosing a
+model or reasoning effort per subagent, honor it:
+
+- `cheap`: mechanical leaves. Rename sweeps, fixture generation, applying a
+  pattern already decided elsewhere. Low effort, cheaper model.
+- `strong`: design leaves, integration branches, and every verification pass.
+
+The driver stays on the strong model always; a weak driver invalidates every
+verification above layer one. When a harness exposes a router or model-choice
+skill, delegate the tier decision to it and record what it returned in
+PLAN.md; otherwise assign the tier yourself at plan time, when the leaf's
+character is clearest, and do not revisit it per dispatch.
 
 ## When NOT to orchestrate
 

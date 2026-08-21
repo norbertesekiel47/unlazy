@@ -5,22 +5,57 @@
 // Usage:
 //   node gate-check.mjs [file ...]          run unmet gates' checks, update files
 //   node gate-check.mjs --status [file ...] report only, change nothing
+//   node gate-check.mjs --jobs 8 ...        run up to N checks concurrently (default 1)
 //   node gate-check.mjs --timeout 60 ...    per-check timeout in seconds (default 120)
 //
-// Files default to GATES.md plus gates/*.md in the current directory.
+// Files default to GATES.md plus gates/*.md in the current directory. Naming the
+// files you care about is the fast path: a leaf verify should re-run that leaf,
+// not the whole tree.
+//
+// Identical CHECK commands run once per invocation and share their output, so a
+// branch gate that re-runs its children's checks pays for each distinct command
+// once. EXPECT is still evaluated per gate.
+//
 // Exit codes: 0 = all gates met (or honestly abandoned), 1 = unmet gates remain,
 //             2 = usage or parse error.
 
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { join } from "node:path";
 
-const args = process.argv.slice(2);
-const statusOnly = args.includes("--status");
+const MAX_OUTPUT = 8 * 1024 * 1024;
+
+function usage(message) {
+  console.error(`gate-check: ${message}`);
+  console.error("usage: gate-check.mjs [--status] [--jobs N] [--timeout SECONDS] [file ...]");
+  process.exit(2);
+}
+
+// --- argument parsing -------------------------------------------------------
+// Flags consume their value explicitly; everything left over is a file. The
+// previous positional filter dropped the first argument whenever --timeout was
+// absent, which silently globbed the whole tree (or skipped a named file).
+
+const argv = process.argv.slice(2);
+let statusOnly = false;
 let timeoutSec = 120;
-const tIdx = args.indexOf("--timeout");
-if (tIdx !== -1) timeoutSec = Number(args[tIdx + 1]) || 120;
-const fileArgs = args.filter((a, i) => !a.startsWith("--") && i !== tIdx + 1);
+let jobs = 1;
+const files = [];
+
+for (let i = 0; i < argv.length; i++) {
+  const arg = argv[i];
+  if (arg === "--status") { statusOnly = true; continue; }
+  if (arg === "--timeout" || arg === "--jobs") {
+    const raw = argv[++i];
+    if (raw === undefined) usage(`${arg} needs a value`);
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 1) usage(`${arg} needs a positive number, got "${raw}"`);
+    if (arg === "--timeout") timeoutSec = value; else jobs = Math.floor(value);
+    continue;
+  }
+  if (arg.startsWith("--")) usage(`unknown option "${arg}"`);
+  files.push(arg);
+}
 
 function defaultFiles(dir) {
   const found = [];
@@ -35,11 +70,13 @@ function defaultFiles(dir) {
   return found;
 }
 
-const files = fileArgs.length ? fileArgs : defaultFiles(process.cwd());
-if (!files.length) {
+const targets = files.length ? files : defaultFiles(process.cwd());
+if (!targets.length) {
   console.error("gate-check: no gate files found (GATES.md or gates/*.md)");
   process.exit(2);
 }
+
+// --- gate file parsing (format spec: references/gates.md) -------------------
 
 const GATE_RE = /^- \[( |x|X)\] (.*)$/;
 const ATTR_RE = /^\s+(CHECK|EXPECT|EVIDENCE):\s?(.*)$/;
@@ -90,38 +127,110 @@ function tail(output, max = 200) {
   return (last || "(no output)").slice(0, max);
 }
 
-let totalUnmet = 0;
-let totalMet = 0;
-let totalAbandoned = 0;
+// --- check execution --------------------------------------------------------
 
-for (const file of files) {
+function runCommand(command) {
+  return new Promise(resolve => {
+    let child;
+    try {
+      child = spawn(command, {
+        shell: true, timeout: timeoutSec * 1000, killSignal: "SIGKILL",
+      });
+    } catch (e) {
+      resolve({ output: "", status: null, error: e.message });
+      return;
+    }
+    let out = "";
+    let truncated = false;
+    const collect = chunk => {
+      if (truncated) return;
+      out += chunk;
+      if (out.length > MAX_OUTPUT) { out = out.slice(0, MAX_OUTPUT); truncated = true; child.kill("SIGKILL"); }
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", collect);
+    child.stderr?.on("data", collect);
+    child.on("error", e => resolve({ output: out, status: null, error: e.message }));
+    child.on("close", (status, signal) => {
+      const error = signal && !truncated ? `killed by ${signal} (timeout ${timeoutSec}s?)` : null;
+      resolve({ output: out, status, error });
+    });
+  });
+}
+
+// One promise per distinct command: a shared CHECK runs once, every gate that
+// names it reads the same output and applies its own EXPECT.
+const commandRuns = new Map();
+function runShared(command) {
+  let run = commandRuns.get(command);
+  if (!run) { run = runCommand(command); commandRuns.set(command, run); }
+  return run;
+}
+
+async function pool(tasks, size) {
+  const results = new Array(tasks.length);
+  let next = 0;
+  const worker = async () => {
+    while (true) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      results[i] = await tasks[i]();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(size, tasks.length) }, worker));
+  return results;
+}
+
+// --- main -------------------------------------------------------------------
+
+const documents = [];
+for (const file of targets) {
   let text;
   try { text = readFileSync(file, "utf8"); } catch (e) {
     console.error(`gate-check: cannot read ${file}: ${e.message}`);
     process.exit(2);
   }
   const lines = text.split(/\r?\n/);
-  const { gates, abandoned } = parse(lines);
-  if (!gates.length) {
-    console.log(`${file}: no gates found`);
-    continue;
+  documents.push({ file, lines, ...parse(lines) });
+}
+
+// Collect the gates that need a run, then execute every distinct command.
+const pending = [];
+for (const doc of documents) {
+  for (const gate of doc.gates) {
+    if (doc.abandoned.has(gate.id)) continue;
+    const pendingEvidence = !gate.evidence || /^pending$/i.test(gate.evidence);
+    if (!statusOnly && gate.check && (!gate.checked || pendingEvidence)) pending.push(gate);
   }
+}
+
+const distinct = [...new Set(pending.map(g => g.check))];
+console.log(`Jobs: ${jobs}`);
+if (distinct.length < pending.length) {
+  console.log(`Checks: ${distinct.length} distinct, ${pending.length - distinct.length} shared`);
+}
+
+await pool(distinct.map(command => () => runShared(command)), jobs);
+
+// Apply results in file order so output stays deterministic under any job count.
+let totalUnmet = 0;
+let totalMet = 0;
+let totalAbandoned = 0;
+
+for (const doc of documents) {
+  const { file, lines, gates, abandoned } = doc;
+  if (!gates.length) { console.log(`${file}: no gates found`); continue; }
   let changed = false;
 
   for (const gate of gates) {
-    const isAbandoned = abandoned.has(gate.id);
+    if (abandoned.has(gate.id)) { totalAbandoned++; continue; }
     const pendingEvidence = !gate.evidence || /^pending$/i.test(gate.evidence);
-
-    if (isAbandoned) { totalAbandoned++; continue; }
-
-    // Run checks for gates that are unchecked, or checked but missing evidence.
     const needsRun = !statusOnly && gate.check && (!gate.checked || pendingEvidence);
+
     if (needsRun) {
-      const res = spawnSync(gate.check, {
-        shell: true, encoding: "utf8", timeout: timeoutSec * 1000,
-        maxBuffer: 8 * 1024 * 1024,
-      });
-      const output = `${res.stdout || ""}\n${res.stderr || ""}`;
+      const res = await runShared(gate.check);
+      const output = res.output;
       // With an EXPECT, the match decides (a check may exit non-zero by design);
       // without one, the exit code decides.
       const ok = gate.expect ? expectMatches(gate.expect, output) : res.status === 0;
@@ -136,8 +245,7 @@ for (const file of files) {
         changed = true;
         console.log(`  PASS ${gate.id}: ${gate.title}`);
       } else {
-        const why = res.error ? res.error.message : tail(output);
-        console.log(`  FAIL ${gate.id}: ${gate.title}\n       ${why}`);
+        console.log(`  FAIL ${gate.id}: ${gate.title}\n       ${res.error || tail(output)}`);
       }
     }
 

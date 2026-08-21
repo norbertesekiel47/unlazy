@@ -26,6 +26,10 @@ Done means every box is checked with evidence recorded. Run the bundled checker 
 node <this-skill-dir>/scripts/gate-check.mjs GATES.md
 ```
 
+Name the files you want checked; a bare `gate-check` globs `GATES.md` plus every
+`gates/*.md` in the directory. Add `--jobs 8` to run independent checks
+concurrently, and identical CHECK commands run once per invocation.
+
 Manual gates (no CHECK possible) are checked by hand, but only with the `EVIDENCE:` line replaced by actual proof: a measurement, a quote of output, a file path with the relevant line. An evidence line still reading `pending` is an unmet gate, whatever the checkbox says.
 
 If a gate becomes genuinely impossible, do not quietly drop it. Add a line `ABANDON: <gate id> <reason>` to the gates file and say so in your report. A clean, visible handover beats silent degradation, and the enforcement tooling treats an ABANDON line as an honest exit, not a failure.
@@ -34,7 +38,7 @@ If a gate becomes genuinely impossible, do not quietly drop it. Add a line `ABAN
 
 **Solo** (default). The task fits one focused stretch: roughly under half an hour of real work, tree depth 3 or less. One `GATES.md`, work until it is fully checked, report with the ledger pasted.
 
-**Orchestrated**. The task is a build: tree depth 4 or more, or clearly beyond one sitting. Decompose per [references/method.md](references/method.md), write `PLAN.md` plus one gates file per leaf under `gates/`, and run each leaf as a fresh subagent with a narrow brief. Read [references/orchestration.md](references/orchestration.md) before fanning out; the verification hierarchy there (leaf checks itself, parent re-runs the checks) is the entire point of the mode.
+**Orchestrated**. The task is a build: tree depth 4 or more, or clearly beyond one sitting. Decompose per [references/method.md](references/method.md), write `PLAN.md` plus one gates file per leaf under `gates/`, and dispatch every leaf whose dependencies are met as a fresh subagent with a narrow brief, verifying each one as it returns rather than in lockstep. Read [references/orchestration.md](references/orchestration.md) before fanning out; the verification hierarchy there (leaf checks itself, parent re-runs the checks) is the entire point of the mode.
 
 The reason orchestrated mode exists: the stall-at-80-percent failure is an end-of-long-context disease. A fresh context per leaf means every leaf starts with full attention. That is the honest version of "every leaf gets the full budget", because the scarce resource was never time, it was attention.
 

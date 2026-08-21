@@ -58,6 +58,33 @@ A gate is unmet if any of these hold:
 - **Five to twelve gates per leaf** is the useful range. Two gates means the
   leaf is under-specified; twenty means the leaf should have been two leaves.
 
+## Leaf gates and branch gates
+
+A leaf's gates cover **only that leaf**: its own deliverable, checked through
+files the leaf owns in PLAN.md. Nothing wider.
+
+Whole-project checks belong to the branch or root integration gates, and run
+once there:
+
+- the full build or typecheck
+- the whole test suite
+- repo-wide lint or formatting
+- cross-child end-to-end smoke tests
+
+Two reasons, and the second is the one that bites. First, cost: twelve leaves
+each running the full suite is twelve full suites to learn one thing. Second,
+authority: a leaf cannot fix a failure outside its file lease, so a
+project-wide CHECK in a leaf gate either blocks it on someone else's work or
+teaches it to widen its scope. Both are worse than catching the failure once,
+upstairs, where integration is actually owned.
+
+The test for a misplaced gate: if a CHECK can go red because of a file this
+leaf does not own, it belongs in a branch gate. Move it up, do not weaken it.
+
+Leaf CHECKs should name their target the same way. `gate-check.mjs
+gates/leaf-x.md` verifies one leaf; a bare `gate-check` globs `GATES.md` plus
+every `gates/*.md` and re-runs the whole tree.
+
 ## Numbers rule
 
 Any number that will appear in a final report deserves its own gate with a
