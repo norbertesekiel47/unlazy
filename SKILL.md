@@ -1,6 +1,6 @@
 ---
 name: unlazy
-description: Anti-laziness execution discipline for substantial tasks. Use when work keeps coming back half done, when an agent reports done before it is done, when output must be exhaustive rather than fast, on long autonomous runs that tend to stall at 80 percent, or on any invocation like /unlazy, "tree N", "gates", or "do not stop until it is done". v2 enforces completion through gate files and runnable checks instead of promises. Core method is the Depth Tree, which decomposes work into leaves that each get finished against their own gates.
+description: "Anti-laziness execution discipline for substantial tasks. Use when work comes back half done, when an agent reports done before it is done, when output must be exhaustive rather than fast, on long runs that stall at 80 percent, or on /unlazy, \"tree N\", \"gates\", \"do not stop until it is done\"."
 license: MIT
 metadata:
   author: Leonxlnx
